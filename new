@@ -13,4 +13,10 @@ users_flat_df = users_df.withColumn("user_id", col("user.user_id")) \
 
 
 
-
+users_flat_df = users_df.withColumn("home_street", col("address.home.street")) \
+    .withColumn("home_city", col("address.home.city")) \
+    .withColumn("home_zipcode", col("address.home.zipcode")) \
+    .withColumn("office_street", col("address.office.street")) \
+    .withColumn("office_city", col("address.office.city")) \
+    .withColumn("office_zipcode", col("address.office.zipcode")) \
+    .drop("address")
