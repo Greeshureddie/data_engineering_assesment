@@ -1,0 +1,108 @@
+#imports
+import boto3
+import pandas as pd
+import json
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, explode
+
+# Initialize Spark and Glue contexts
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = SparkSession.builder.appName("DataIntegration").getOrCreate()
+
+# Load schema CSV from S3
+s3_client = boto3.client('s3')
+schema_bucket = 'taskglueas'
+schema_key = 'schema.csv'
+
+# Download schema file
+schema_obj = s3_client.get_object(Bucket=schema_bucket, Key=schema_key)
+schema_df = pd.read_csv(schema_obj['Body'])
+
+# Infer schema for the final DataFrame
+schema_inferred = schema_df.dtypes.to_dict()
+
+# Read the JSON files from S3
+users_json_path = 's3://taskglueas/users1.json'
+orders_json_path = 's3://taskglueas/orders1.json'
+products_json_path = 's3://taskglueas/products1.json'
+
+# Load users, orders, and products JSON data
+users_df = spark.read.option("multiline", "true").json(users_json_path).selectExpr("explode(users) as user")
+orders_df = spark.read.option("multiline", "true").json(orders_json_path).selectExpr("explode(orders) as order")
+products_df = spark.read.option("multiline", "true").json(products_json_path).selectExpr("explode(products) as product")
+
+# Flatten the nested JSON structures (for users and orders)
+users_flat_df = users_df \
+    .select(
+        col("user.user_id").alias("user_id"),
+        col("user.name.first_name").alias("first_name"),
+        col("user.name.last_name").alias("last_name"),
+        col("user.address.home.street").alias("home_street"),
+        col("user.address.home.city").alias("home_city"),
+        col("user.address.home.zipcode").alias("home_zipcode"),
+        col("user.address.office.street").alias("office_street"),
+        col("user.address.office.city").alias("office_city"),
+        col("user.address.office.zipcode").alias("office_zipcode")
+    )
+    
+orders_flat_df = orders_df \
+    .select(
+        col("order.order_id").alias("order_id"),
+        col("order.customer_id").alias("customer_id"),
+        col("order.order_date").alias("order_date"),
+        explode(col("order.items")).alias("item"),  # Explode items array
+        col("order.total_amount").alias("total_amount")
+    ) \
+    .select(
+        col("order_id"),
+        col("customer_id"),
+        col("order_date"),
+        col("item.product_name").alias("product_name"),
+        col("item.quantity").alias("quantity"),
+        col("item.price").alias("price"),
+        col("total_amount")
+    )
+    
+products_flat_df = products_df \
+    .select(
+        col("product.product_id").alias("product_id"),
+        col("product.product_name").alias("product_name"),
+        col("product.category").alias("category"),
+        col("product.price").alias("price"),
+        col("product.stock_quantity").alias("stock_quantity")
+    )
+    
+# Join the data on appropriate keys (user_id, product_name)
+merged_df = orders_flat_df \
+    .join(users_flat_df, orders_flat_df.customer_id == users_flat_df.user_id, "inner") \
+    .join(products_flat_df, orders_flat_df.product_name == products_flat_df.product_name, "inner") \
+    .select(
+        col("order_id"),
+        col("customer_id"),
+        col("first_name"),
+        col("last_name"),
+        orders_flat_df.product_name.alias("order_product_name"),  # Alias to avoid ambiguity
+        products_flat_df.product_name.alias("product_catalog_name"),  # Alias to avoid ambiguity
+        col("quantity"),
+        products_flat_df.price.alias("product_price"),  # Alias the price column to be specific
+        col("total_amount"),
+        col("home_street"),
+        col("home_city"),
+        col("home_zipcode"),
+        col("office_street"),
+        col("office_city"),
+        col("office_zipcode")
+    )
+            
+# Show the final merged DataFrame
+merged_df.show()
+
+# Write the resulting merged JSON data to a Glue Table
+output_path = 's3://taskglueas/merged_data/'
+merged_df.write.mode("overwrite").json(output_path)
+
+# Clean up resources
+sc.stop()
